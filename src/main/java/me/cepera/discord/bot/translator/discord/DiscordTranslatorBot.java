@@ -4,7 +4,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -183,7 +185,10 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
 
                     List<LayoutComponent> components = new ArrayList<>();
 
-                    List<Option> finalLanguageOptions = new ArrayList<>(languageOptions);
+                    Set<String> added = new HashSet<>();
+                    List<Option> finalLanguageOptions = new ArrayList<>();
+                    languageOptions.stream().filter(opt->added.add(opt.getValue()))
+                        .forEach(finalLanguageOptions::add);
                     if(startLangIndex != 0) {
                         finalLanguageOptions.add(0, Option.of("Previous...", "next-"+Math.max(0, startLangIndex-maxLanguagesOnPage)));
                     }
