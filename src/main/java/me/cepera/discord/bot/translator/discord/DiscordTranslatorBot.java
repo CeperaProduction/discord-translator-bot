@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -20,11 +21,14 @@ import discord4j.core.event.domain.interaction.ChatInputInteractionEvent;
 import discord4j.core.event.domain.interaction.DeferrableInteractionEvent;
 import discord4j.core.event.domain.interaction.MessageInteractionEvent;
 import discord4j.core.event.domain.interaction.SelectMenuInteractionEvent;
+import discord4j.core.event.domain.message.MessageCreateEvent;
 import discord4j.core.object.component.ActionRow;
 import discord4j.core.object.component.LayoutComponent;
 import discord4j.core.object.component.SelectMenu;
 import discord4j.core.object.component.SelectMenu.Option;
+import discord4j.core.object.entity.Member;
 import discord4j.core.object.entity.Message;
+import discord4j.core.object.entity.User;
 import discord4j.core.object.reaction.ReactionEmoji;
 import discord4j.core.spec.EmbedCreateSpec;
 import discord4j.core.spec.MessageCreateSpec;
@@ -34,18 +38,20 @@ import io.netty.util.internal.ThrowableUtil;
 import me.cepera.discord.bot.translator.config.DiscordBotConfig;
 import me.cepera.discord.bot.translator.model.TranslateLanguage;
 import me.cepera.discord.bot.translator.model.TranslatedText;
+import me.cepera.discord.bot.translator.repository.AutoTranslatingChannel;
+import me.cepera.discord.bot.translator.repository.AutoTranslatingChannelRepository;
 import me.cepera.discord.bot.translator.repository.TranslateLanguageUsageRepository;
 import me.cepera.discord.bot.translator.service.TranslateService;
 import me.cepera.discord.bot.translator.utils.UnicodeUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.util.function.Tuples;
 
 public class DiscordTranslatorBot extends BasicDiscordBot{
 
     private static final Logger LOGGER = LogManager.getLogger(DiscordTranslatorBot.class);
 
     public static final String COMMAND_SETUP = "setup";
+    public static final String COMMAND_AUTO = "auto";
 
     public static final String MESSAGE_COMMAND_TRANSLATE = "Translate to";
 
@@ -53,12 +59,16 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
 
     private final TranslateLanguageUsageRepository translateLanguageUsageRepository;
 
+    private final AutoTranslatingChannelRepository autoTranslatingChannelRepository;
+
     @Inject
     public DiscordTranslatorBot(DiscordBotConfig config, TranslateService translateService,
-            TranslateLanguageUsageRepository translateLanguageUsageRepository) {
+            TranslateLanguageUsageRepository translateLanguageUsageRepository,
+            AutoTranslatingChannelRepository autoTranslatingChannelRepository) {
         super(config);
         this.translateService = translateService;
         this.translateLanguageUsageRepository = translateLanguageUsageRepository;
+        this.autoTranslatingChannelRepository = autoTranslatingChannelRepository;
     }
 
     @Override
@@ -68,6 +78,13 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
             sink.next(ApplicationCommandRequest.builder()
                     .name(COMMAND_SETUP)
                     .description("Setting up or removing default languages")
+                    .defaultMemberPermissions("8")
+                    .dmPermission(false)
+                    .build());
+
+            sink.next(ApplicationCommandRequest.builder()
+                    .name(COMMAND_AUTO)
+                    .description("Start/stop automatic translation of messages in channel")
                     .defaultMemberPermissions("8")
                     .dmPermission(false)
                     .build());
@@ -93,17 +110,38 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                     }))
             .subscribe();
 
+        client.on(MessageCreateEvent.class)
+            .flatMap(event->this.handleMessageCreateEvent(event)
+                    .onErrorResume(e->{
+                        LOGGER.error("Error on handling message create event", e);
+                        return Mono.empty();
+                    }))
+            .subscribe();
+
     }
 
     @Override
     protected Mono<Void> handleChatInputInteractionEvent(ChatInputInteractionEvent event) {
-        if(!event.getCommandName().equals(COMMAND_SETUP)) {
-            return Mono.empty();
+        if(event.getCommandName().equals(COMMAND_SETUP)) {
+            return event.deferReply()
+                    .withEphemeral(true)
+                    .then(sendLanguateChooseMessage(event, "setup", Snowflake.of(1), 0))
+                    .onErrorResume(e->sendErrorMessage(event, e));
         }
-        return event.deferReply()
-                .withEphemeral(true)
-                .then(sendLanguateChooseMessage(event, "setup", Snowflake.of(1), 0))
-                .onErrorResume(e->sendErrorMessage(event, e));
+        if(event.getCommandName().equals(COMMAND_AUTO)) {
+            return event.deferReply()
+                    .withEphemeral(true)
+                    .then(autoTranslatingChannelRepository.getChannel(event.getInteraction().getChannelId().asLong()))
+                    .switchIfEmpty(Mono.defer(()->sendLanguateChooseMessage(event, "auto", Snowflake.of(1), 0)).then(Mono.empty()))
+                    .flatMap(channel->autoTranslatingChannelRepository.removeChannel(channel.getChannelId())
+                            .then(event.editReply()
+                                    .withContentOrNull("Automatic translation for this channel has stopped")
+                                    .then(Mono.fromRunnable(()->LOGGER.info("Autamatic translation for channel {} stopped by {}",
+                                            channel.getChannelId(), event.getInteraction().getUser().getTag()))
+                                            .then())))
+                    .onErrorResume(e->sendErrorMessage(event, e));
+        }
+        return Mono.empty();
     }
 
     @Override
@@ -161,10 +199,29 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                     .then(event.deleteReply());
         case "setup":
             return event.deferEdit()
+                    .withEphemeral(true)
                     .then(translateService.getLanguage(selectedValue))
                     .flatMap(language->setupLanguageCommand(event, language));
+        case "auto":
+            return event.deferEdit()
+                    .withEphemeral(true)
+                    .then(translateService.getLanguage(selectedValue))
+                    .flatMap(language->setupAutoTranslation(event, language));
         default: return Mono.empty();
         }
+    }
+
+    private Mono<Void> handleMessageCreateEvent(MessageCreateEvent event){
+        return getDiscordClient().getSelf()
+                .filter(self->self.id().asLong() == event.getMessage().getAuthor().get().getId().asLong())
+                .switchIfEmpty(event.getMessage().getChannel()
+                    .zipWith(autoTranslatingChannelRepository.getChannel(event.getMessage().getChannelId().asLong())
+                            .flatMap(auto->translateService.getLanguage(auto.getLanguageCode())))
+                    .flatMap(tuple->translate(event.getMessage(), tuple.getT2())
+                            .flatMap(translated->sendTranslation(event.getMessage(),
+                                    translated.getOriginalLanguage(), tuple.getT2(), translated.getText())))
+                    .then(Mono.empty()))
+                .then();
     }
 
     private Mono<Void> sendLanguateChooseMessage(DeferrableInteractionEvent event, String operation, Snowflake messageId, int startLangIndex){
@@ -211,7 +268,12 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
     }
 
     private Mono<Void> handleTranslationCommand(DeferrableInteractionEvent event, Message message, TranslateLanguage targetLanguage){
+        return translate(message, targetLanguage)
+                .flatMap(text->sendTranslation(event, message, text.getOriginalLanguage(), targetLanguage, text.getText()))
+                .onErrorResume(e->sendErrorMessage(event, e));
+    }
 
+    private Mono<TranslatedText> translate(Message message, TranslateLanguage targetLanguage){
         List<String> texts = new ArrayList<>();
         if(!message.getContent().trim().isEmpty()) {
             texts.add(message.getContent());
@@ -234,10 +296,8 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                 .map(translations->{
                    TranslateLanguage sourceLanguage = translations.get(0).getOriginalLanguage();
                    List<String> translatedStrings = translations.stream().map(TranslatedText::getText).collect(Collectors.toList());
-                   return Tuples.of(String.join("\n\n", translatedStrings), sourceLanguage);
-                })
-                .flatMap(tuple->sendTranslation(event, message, tuple.getT2(), targetLanguage, tuple.getT1()))
-                .onErrorResume(e->sendErrorMessage(event, e));
+                   return new TranslatedText(String.join("\n\n", translatedStrings), sourceLanguage);
+                });
     }
 
     private Mono<Void> setupLanguageCommand(DeferrableInteractionEvent event, TranslateLanguage language){
@@ -274,8 +334,34 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                                         .then()))));
     }
 
+    private Mono<Void> setupAutoTranslation(DeferrableInteractionEvent event, TranslateLanguage language){
+        return autoTranslatingChannelRepository.setChannel(new AutoTranslatingChannel(
+                    event.getInteraction().getChannelId().asLong(), language.getCode()))
+                .then(event.editReply()
+                        .withContentOrNull("Automatic translation for this channel has started.")
+                        .withComponentsOrNull(Collections.emptyList())
+                        .then(Mono.fromRunnable(()->LOGGER.info("Autamatic translation for channel {} started by {}",
+                                event.getInteraction().getChannelId(), event.getInteraction().getUser().getTag())))
+                        .then());
+    }
+
+    private Mono<Void> sendTranslation(Message message, TranslateLanguage sourceLanguage,
+            TranslateLanguage targetLanguage, String translatedContent){
+        return sendTranslation(message, Optional.empty(), Optional.empty(), sourceLanguage, targetLanguage, translatedContent);
+    }
+
     private Mono<Void> sendTranslation(DeferrableInteractionEvent event, Message message, TranslateLanguage sourceLanguage,
             TranslateLanguage targetLanguage, String translatedContent){
+        return sendTranslation(message, event.getInteraction().getMember(), Optional.of(event.getInteraction().getUser()),
+                        sourceLanguage, targetLanguage, translatedContent)
+                .then(translateLanguageUsageRepository.setLastLanguageCode(event.getInteraction().getUser().getId().asLong(),
+                        targetLanguage.getCode())
+                        .onErrorResume(e->Mono.fromRunnable(()->
+                            LOGGER.error("Error on saving last language: {}", ThrowableUtil.stackTraceToString(e)))));
+    }
+
+    private Mono<Void> sendTranslation(Message message, Optional<Member> optMember, Optional<User> optUser,
+            TranslateLanguage sourceLanguage, TranslateLanguage targetLanguage, String translatedContent){
         return Mono.zip(unicodeFlagEmoji(sourceLanguage)
                         .map(emoji->emoji+" ")
                         .switchIfEmpty(Mono.just("")),
@@ -291,13 +377,10 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                                     .addField("From", langEmojiTuple.getT1()+sourceLanguage.getName(), true)
                                     .addField("To", langEmojiTuple.getT2()+targetLanguage.getName(), true)
                                     .timestamp(Instant.ofEpochMilli(System.currentTimeMillis()))
-                                    .footer(getCommandSenderName(event), event.getInteraction().getUser().getAvatarUrl())
+                                    .footer(getCommandSenderName(optMember, optUser), optUser.map(user->user.getAvatarUrl()).orElse(null))
                                     .build())
                                 .build())))
-                .then(translateLanguageUsageRepository.setLastLanguageCode(event.getInteraction().getUser().getId().asLong(),
-                        targetLanguage.getCode())
-                        .onErrorResume(e->Mono.fromRunnable(()->
-                            LOGGER.error("Error on saving last language: {}", ThrowableUtil.stackTraceToString(e)))));
+                .then();
     }
 
     private Mono<Void> sendErrorMessage(DeferrableInteractionEvent event, Throwable e){
@@ -312,11 +395,9 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
             .then();
     }
 
-    private String getCommandSenderName(DeferrableInteractionEvent event) {
-        return event.getInteraction().getMember()
-                .map(member->member.getDisplayName())
-                .orElseGet(()->event.getInteraction().getUser().getGlobalName()
-                        .orElseGet(()->event.getInteraction().getUser().getUsername()));
+    private String getCommandSenderName(Optional<Member> optMember, Optional<User> optUser) {
+        return optMember.map(member->member.getDisplayName())
+                .orElseGet(()->optUser.flatMap(User::getGlobalName).orElse(""));
     }
 
     private Mono<String> unicodeFlagEmoji(TranslateLanguage lang){

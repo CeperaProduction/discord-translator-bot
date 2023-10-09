@@ -6,7 +6,9 @@ import javax.inject.Singleton;
 
 import dagger.Module;
 import dagger.Provides;
+import me.cepera.discord.bot.translator.repository.AutoTranslatingChannelRepository;
 import me.cepera.discord.bot.translator.repository.TranslateLanguageUsageRepository;
+import me.cepera.discord.bot.translator.repository.sql.SQLiteAutoTranslatingChannelRepository;
 import me.cepera.discord.bot.translator.repository.sql.SQLiteTranslateLanguageUsageRepository;
 import me.cepera.discord.bot.translator.repository.sql.db.SQLiteDatabase;
 
@@ -23,6 +25,12 @@ public class DataModule {
     @Singleton
     TranslateLanguageUsageRepository translateLanguageUsageRepository(SQLiteDatabase sqLiteDatabase) {
         return new SQLiteTranslateLanguageUsageRepository(sqLiteDatabase);
+    }
+
+    @Provides
+    @Singleton
+    AutoTranslatingChannelRepository autoTranslatingChannelRepository(SQLiteDatabase sqLiteDatabase) {
+        return new SQLiteAutoTranslatingChannelRepository(sqLiteDatabase);
     }
 
 }
