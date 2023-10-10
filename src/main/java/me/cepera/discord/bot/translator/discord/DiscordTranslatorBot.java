@@ -22,6 +22,7 @@ import discord4j.core.event.domain.interaction.DeferrableInteractionEvent;
 import discord4j.core.event.domain.interaction.MessageInteractionEvent;
 import discord4j.core.event.domain.interaction.SelectMenuInteractionEvent;
 import discord4j.core.event.domain.message.MessageCreateEvent;
+import discord4j.core.event.domain.message.MessageUpdateEvent;
 import discord4j.core.object.component.ActionRow;
 import discord4j.core.object.component.LayoutComponent;
 import discord4j.core.object.component.SelectMenu;
@@ -32,6 +33,7 @@ import discord4j.core.object.entity.User;
 import discord4j.core.object.reaction.ReactionEmoji;
 import discord4j.core.spec.EmbedCreateSpec;
 import discord4j.core.spec.MessageCreateSpec;
+import discord4j.core.spec.MessageEditSpec;
 import discord4j.discordjson.json.ApplicationCommandRequest;
 import discord4j.rest.util.AllowedMentions;
 import io.netty.util.internal.ThrowableUtil;
@@ -45,6 +47,8 @@ import me.cepera.discord.bot.translator.service.TranslateService;
 import me.cepera.discord.bot.translator.utils.UnicodeUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.function.Tuple2;
+import reactor.util.function.Tuples;
 
 public class DiscordTranslatorBot extends BasicDiscordBot{
 
@@ -118,6 +122,14 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                     }))
             .subscribe();
 
+        client.on(MessageUpdateEvent.class)
+            .flatMap(event->this.handleMessageUpdateEvent(event)
+                    .onErrorResume(e->{
+                        LOGGER.error("Error on handling message create event", e);
+                        return Mono.empty();
+                    }))
+            .subscribe();
+
     }
 
     @Override
@@ -135,7 +147,7 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                     .switchIfEmpty(Mono.defer(()->sendLanguateChooseMessage(event, "auto", Snowflake.of(1), 0)).then(Mono.empty()))
                     .flatMap(channel->autoTranslatingChannelRepository.removeChannel(channel.getChannelId())
                             .then(event.editReply()
-                                    .withContentOrNull("Automatic translation for this channel has stopped")
+                                    .withContentOrNull("Automatic translation for this channel was stopped")
                                     .then(Mono.fromRunnable(()->LOGGER.info("Autamatic translation for channel {} stopped by {}",
                                             channel.getChannelId(), event.getInteraction().getUser().getTag()))
                                             .then())))
@@ -212,16 +224,56 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
     }
 
     private Mono<Void> handleMessageCreateEvent(MessageCreateEvent event){
-        return getDiscordClient().getSelf()
-                .filter(self->self.id().asLong() == event.getMessage().getAuthor().get().getId().asLong())
-                .switchIfEmpty(event.getMessage().getChannel()
+        return isMyMessage(event.getMessage())
+                .filter(my->!my)
+                .flatMap(my->event.getMessage().getChannel()
                     .zipWith(autoTranslatingChannelRepository.getChannel(event.getMessage().getChannelId().asLong())
                             .flatMap(auto->translateService.getLanguage(auto.getLanguageCode())))
                     .flatMap(tuple->translate(event.getMessage(), tuple.getT2())
                             .flatMap(translated->sendTranslation(event.getMessage(),
                                     translated.getOriginalLanguage(), tuple.getT2(), translated.getText())))
-                    .then(Mono.empty()))
+                    .then());
+    }
+
+    private Mono<Void> handleMessageUpdateEvent(MessageUpdateEvent event){
+        if(!event.isContentChanged() && !event.isEmbedsChanged()) {
+            return Mono.empty();
+        }
+        return event.getMessage()
+                .filterWhen(message->isNotMyMessage(message))
+                .flatMap(message->message.getChannel()
+                        .zipWhen(channel->autoTranslatingChannelRepository.getChannel(channel.getId().asLong())
+                                .flatMap(auto->translateService.getLanguage(auto.getLanguageCode())))
+                        .flatMap(tuple->tuple.getT1().getMessagesAfter(message.getId())
+                                .take(50)
+                                .filterWhen(reply->isMyMessage(reply))
+                                .filter(reply->reply.getMessageReference()
+                                        .flatMap(ref->ref.getMessageId())
+                                        .map(ref->ref.equals(message.getId()))
+                                        .orElse(false))
+                                .filter(reply->!reply.getEmbeds().isEmpty()
+                                        && reply.getEmbeds().get(0).getFooter()
+                                            .map(footer->(footer.getText() == null || footer.getText().isEmpty())
+                                                    && !footer.getIconUrl().isPresent())
+                                            .orElse(true))
+                                .take(1)
+                                .singleOrEmpty()
+                                .map(reply->Tuples.of(reply, tuple.getT2())))
+                        .flatMap(tuple->translate(message, tuple.getT2())
+                                .flatMap(translated->sendTranslation(message, translated.getOriginalLanguage(), tuple.getT2(),
+                                        translated.getText(), tuple.getT1()))))
                 .then();
+    }
+
+    private Mono<Boolean> isMyMessage(Message message){
+        return getDiscordClient().getSelf().zipWith(Mono.justOrEmpty(message.getAuthor()))
+            .filter(tuple->tuple.getT1().id().asLong() == tuple.getT2().getId().asLong())
+            .map(tuple->Boolean.TRUE)
+            .switchIfEmpty(Mono.just(Boolean.FALSE));
+    }
+
+    private Mono<Boolean> isNotMyMessage(Message message){
+        return isMyMessage(message).map(res->!res);
     }
 
     private Mono<Void> sendLanguateChooseMessage(DeferrableInteractionEvent event, String operation, Snowflake messageId, int startLangIndex){
@@ -338,7 +390,7 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
         return autoTranslatingChannelRepository.setChannel(new AutoTranslatingChannel(
                     event.getInteraction().getChannelId().asLong(), language.getCode()))
                 .then(event.editReply()
-                        .withContentOrNull("Automatic translation for this channel has started.")
+                        .withContentOrNull("Automatic translation for this channel was started.")
                         .withComponentsOrNull(Collections.emptyList())
                         .then(Mono.fromRunnable(()->LOGGER.info("Autamatic translation for channel {} started by {}",
                                 event.getInteraction().getChannelId(), event.getInteraction().getUser().getTag())))
@@ -348,6 +400,11 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
     private Mono<Void> sendTranslation(Message message, TranslateLanguage sourceLanguage,
             TranslateLanguage targetLanguage, String translatedContent){
         return sendTranslation(message, Optional.empty(), Optional.empty(), sourceLanguage, targetLanguage, translatedContent);
+    }
+
+    private Mono<Void> sendTranslation(Message message, TranslateLanguage sourceLanguage,
+            TranslateLanguage targetLanguage, String translatedContent, Message messageToEdit){
+        return sendTranslation(message, Optional.empty(), Optional.empty(), sourceLanguage, targetLanguage, translatedContent, messageToEdit);
     }
 
     private Mono<Void> sendTranslation(DeferrableInteractionEvent event, Message message, TranslateLanguage sourceLanguage,
@@ -362,12 +419,7 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
 
     private Mono<Void> sendTranslation(Message message, Optional<Member> optMember, Optional<User> optUser,
             TranslateLanguage sourceLanguage, TranslateLanguage targetLanguage, String translatedContent){
-        return Mono.zip(unicodeFlagEmoji(sourceLanguage)
-                        .map(emoji->emoji+" ")
-                        .switchIfEmpty(Mono.just("")),
-                    unicodeFlagEmoji(targetLanguage)
-                        .map(emoji->emoji+" ")
-                        .switchIfEmpty(Mono.just("")))
+        return getFlags(sourceLanguage, targetLanguage)
                 .flatMap(langEmojiTuple->message.getChannel()
                         .flatMap(channel->channel.createMessage(MessageCreateSpec.builder()
                                 .messageReference(message.getId())
@@ -381,6 +433,31 @@ public class DiscordTranslatorBot extends BasicDiscordBot{
                                     .build())
                                 .build())))
                 .then();
+    }
+
+    private Mono<Void> sendTranslation(Message message, Optional<Member> optMember, Optional<User> optUser,
+            TranslateLanguage sourceLanguage, TranslateLanguage targetLanguage, String translatedContent, Message messageToEdit){
+        return getFlags(sourceLanguage, targetLanguage)
+                .flatMap(langEmojiTuple->messageToEdit.edit(MessageEditSpec.builder()
+                        .allowedMentionsOrNull(AllowedMentions.suppressAll())
+                        .embedsOrNull(Arrays.asList(EmbedCreateSpec.builder()
+                            .description(translatedContent)
+                            .addField("From", langEmojiTuple.getT1()+sourceLanguage.getName(), true)
+                            .addField("To", langEmojiTuple.getT2()+targetLanguage.getName(), true)
+                            .timestamp(Instant.ofEpochMilli(System.currentTimeMillis()))
+                            .footer(getCommandSenderName(optMember, optUser), optUser.map(user->user.getAvatarUrl()).orElse(null))
+                            .build()))
+                        .build()))
+                .then();
+    }
+
+    private Mono<Tuple2<String, String>> getFlags(TranslateLanguage lang1, TranslateLanguage lang2){
+        return Mono.zip(unicodeFlagEmoji(lang1)
+                .map(emoji->emoji+" ")
+                .switchIfEmpty(Mono.just("")),
+            unicodeFlagEmoji(lang2)
+                .map(emoji->emoji+" ")
+                .switchIfEmpty(Mono.just("")));
     }
 
     private Mono<Void> sendErrorMessage(DeferrableInteractionEvent event, Throwable e){

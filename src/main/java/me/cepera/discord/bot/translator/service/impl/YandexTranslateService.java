@@ -59,7 +59,7 @@ public class YandexTranslateService implements TranslateService{
         List<TranslateLanguage> sortedLanguages = new ArrayList<>(languages);
         Collections.sort(sortedLanguages, (l1, l2)->l1.getCode().compareTo(l2.getCode()));
         this.languages = sortedLanguages;
-        LOGGER.info("Loaded languages: {}", this.languages);
+        LOGGER.debug("Loaded languages: {}", this.languages);
     }
 
     @Override
