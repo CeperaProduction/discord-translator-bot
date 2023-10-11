@@ -6,7 +6,7 @@
 
 	<groupId>me.cepera</groupId>
 	<artifactId>discord-translator-bot</artifactId>
-	<version>1.1.1</version>
+	<version>1.2.0</version>
 
 	<name>Translator bot for discord. Yandex translator implementation.</name>
 

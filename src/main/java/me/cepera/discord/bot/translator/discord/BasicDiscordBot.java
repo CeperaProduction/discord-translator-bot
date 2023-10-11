@@ -5,34 +5,22 @@ import org.apache.logging.log4j.Logger;
 
 import discord4j.core.DiscordClient;
 import discord4j.core.GatewayDiscordClient;
-import discord4j.core.event.domain.interaction.ChatInputAutoCompleteEvent;
-import discord4j.core.event.domain.interaction.ChatInputInteractionEvent;
-import discord4j.core.event.domain.interaction.MessageInteractionEvent;
 import discord4j.core.event.domain.lifecycle.ReadyEvent;
 import discord4j.discordjson.json.ApplicationCommandRequest;
 import me.cepera.discord.bot.translator.config.DiscordBotConfig;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Scheduler;
-import reactor.core.scheduler.Schedulers;
 
 public abstract class BasicDiscordBot implements DiscordBot{
 
     private static final Logger LOGGER = LogManager.getLogger(BasicDiscordBot.class);
 
-    private final Scheduler botActionsScheduler = Schedulers.newBoundedElastic(Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE, Integer.MAX_VALUE, "discord-bot-actions");
-
     protected final DiscordBotConfig config;
 
-    private DiscordClient discordClient;
+    private final DiscordClient discordClient;
 
     public BasicDiscordBot(DiscordBotConfig config) {
         this.config = config;
-    }
-
-    @Override
-    public void start() {
-
         String botApiKey = config.getKey();
 
         if(botApiKey == null || botApiKey.isEmpty()) {
@@ -40,6 +28,10 @@ public abstract class BasicDiscordBot implements DiscordBot{
         }
 
         this.discordClient = DiscordClient.create(botApiKey);
+    }
+
+    @Override
+    public void start() {
         this.discordClient.withGateway(client->{
 
                 client.getEventDispatcher().on(ReadyEvent.class)
@@ -54,7 +46,6 @@ public abstract class BasicDiscordBot implements DiscordBot{
                 return client.onDisconnect();
             })
             .block();
-
     }
 
     @Override
@@ -67,7 +58,9 @@ public abstract class BasicDiscordBot implements DiscordBot{
             .flatMapMany(appId->commandsToRegister()
                     .flatMap(command->client.getRestClient().getApplicationService()
                             .createGlobalApplicationCommand(appId, command)))
-            .doOnNext(commandData->LOGGER.info("Global command {} registered.", commandData.name()))
+            .doOnNext(commandData->LOGGER.info("Global {} {} registered.",
+                            commandData.type().toOptional().map(type->type == 1).orElse(false) ? "command" : "interaction",
+                            commandData.name()))
             .subscribe();
     }
 
@@ -77,49 +70,10 @@ public abstract class BasicDiscordBot implements DiscordBot{
 
     protected void configureGatewayClient(GatewayDiscordClient client) {
 
-        client.on(ChatInputInteractionEvent.class)
-            .publishOn(botActionsScheduler)
-            .flatMap(event->this.handleChatInputInteractionEvent(event)
-                    .onErrorResume(e->{
-                        LOGGER.error("Error on handling chat interaction", e);
-                        return Mono.empty();
-                    }))
-            .subscribe();
-
-        client.on(MessageInteractionEvent.class)
-            .publishOn(botActionsScheduler)
-            .flatMap(event->this.handleMessageInteractionEvent(event)
-                    .onErrorResume(e->{
-                        LOGGER.error("Error on handling message interaction", e);
-                        return Mono.empty();
-                    }))
-            .subscribe();
-
-        client.on(ChatInputAutoCompleteEvent.class)
-            .publishOn(botActionsScheduler)
-            .flatMap(event->this.handleChatInputAutocompleteEvent(event)
-                    .onErrorResume(e->{
-                        LOGGER.error("Error on handling autocompletion", e);
-                        return Mono.empty();
-                    }))
-            .subscribe();
-
     }
 
     protected Mono<Void> handleReadyEvent(ReadyEvent event){
         return Mono.fromRunnable(()->LOGGER.info("Discord bot logged in as {}", event.getSelf().getUsername()));
-    }
-
-    protected Mono<Void> handleChatInputInteractionEvent(ChatInputInteractionEvent event){
-        return Mono.empty();
-    }
-
-    protected Mono<Void> handleChatInputAutocompleteEvent(ChatInputAutoCompleteEvent event){
-        return Mono.empty();
-    }
-
-    protected Mono<Void> handleMessageInteractionEvent(MessageInteractionEvent event){
-        return Mono.empty();
     }
 
 }
