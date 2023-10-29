@@ -96,7 +96,6 @@ public class DiscordTranslatorBot extends EventDrivenDiscordBot implements Disco
             sink.next(ApplicationCommandRequest.builder()
                     .name(MESSAGE_COMMAND_TRANSLATE)
                     .dmPermission(false)
-                    .defaultMemberPermissions(permissionBits(Permission.SEND_MESSAGES))
                     .type(3)
                     .build());
 
