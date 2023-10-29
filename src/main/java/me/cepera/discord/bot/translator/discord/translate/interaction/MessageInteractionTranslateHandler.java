@@ -76,7 +76,7 @@ public class MessageInteractionTranslateHandler implements DiscordEventHandler<M
                 .zipWith(event.getTargetMessage())
                 .flatMap(tuple->translate(tuple.getT2(), tuple.getT1())
                         .flatMap(translation->sendTranslation(event, tuple.getT2(),
-                                translation.getOriginalLanguage(), tuple.getT1(), translation.getText())))
+                                translation.getOriginalLanguage(), tuple.getT1(), translation.getText(), true)))
                 .then(event.deleteReply());
     }
 

@@ -32,7 +32,7 @@ public class TranslateLanguageSelectOperationHandler extends LanguageSelectMenuE
                 .flatMap(channel->channel.getMessageById(Snowflake.of(messageId)))
                 .flatMap(message->translate(message, language)
                         .flatMap(translation->sendTranslation(event, message,
-                                translation.getOriginalLanguage(), language, translation.getText())))
+                                translation.getOriginalLanguage(), language, translation.getText(), true)))
                 .then(event.deleteReply());
     }
 

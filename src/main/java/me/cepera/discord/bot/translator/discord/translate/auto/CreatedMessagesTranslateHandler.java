@@ -49,7 +49,7 @@ public class CreatedMessagesTranslateHandler implements DiscordEventHandler<Mess
                             .flatMap(auto->translateService.getLanguage(auto.getLanguageCode())))
                     .flatMap(tuple->translate(event.getMessage(), tuple.getT2())
                             .flatMap(translated->sendTranslation(event.getMessage(),
-                                    translated.getOriginalLanguage(), tuple.getT2(), translated.getText())))
+                                    translated.getOriginalLanguage(), tuple.getT2(), translated.getText(), false)))
                     .then());
     }
 
